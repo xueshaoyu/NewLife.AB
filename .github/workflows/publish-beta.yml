@@ -1,0 +1,38 @@
+name: publish-beta
+
+on:
+  push:
+    branches: [ main, master ]
+    paths:
+        - 'NewLife.AB/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-publish:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+    - name: Setup dotNET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: |
+          8.x
+          9.x
+          10.x
+    - name: Get Version
+      run: echo "VERSION=$(date '+%Y.%m%d-beta%H%M')" >> $GITHUB_ENV
+    - name: Build
+      run: |
+        dotnet pack --version-suffix ${{ env.VERSION }} -c Release -o out NewLife.AB/NewLife.AB.csproj
+    - name: Publish to GitHub Packages
+      continue-on-error: true
+      run: |
+        dotnet nuget push ./out/*.nupkg --skip-duplicate --source https://nuget.pkg.github.com/NewLifeX/index.json --api-key ${{ github.token }}
+    - name: Publish to NuGet.org
+      run: |
+        dotnet nuget push ./out/*.nupkg --skip-duplicate --source https://api.nuget.org/v3/index.json --api-key ${{ secrets.nugetKey }}

@@ -1,0 +1,63 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFrameworks>net45;net461;netstandard2.0;netstandard2.1</TargetFrameworks>
+    <AssemblyTitle>罗克韦尔 AB PLC 通信协议库</AssemblyTitle>
+    <Description>纯.NET实现的罗克韦尔 / Allen-Bradley Logix 通信协议库，支持 EtherNet/IP（CIP）符号标签读写，提供同步+异步完整 API，适用于工业自动化、数据采集、设备监控等场景</Description>
+    <Company>新生命开发团队</Company>
+    <Copyright>©2002-2026 新生命开发团队</Copyright>
+    <VersionPrefix>1.0</VersionPrefix>
+    <VersionSuffix>$([System.DateTime]::Now.ToString(`yyyy.MMdd`))</VersionSuffix>
+    <Version>$(VersionPrefix).$(VersionSuffix)</Version>
+    <FileVersion>$(Version)</FileVersion>
+    <AssemblyVersion>$(VersionPrefix).*</AssemblyVersion>
+    <Deterministic>false</Deterministic>
+    <OutputPath>..\Bin</OutputPath>
+    <GenerateDocumentationFile>True</GenerateDocumentationFile>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <SignAssembly>True</SignAssembly>
+    <AssemblyOriginatorKeyFile>..\Doc\newlife.snk</AssemblyOriginatorKeyFile>
+    <RootNamespace>NewLife.AB</RootNamespace>
+    <AssemblyName>NewLife.AB</AssemblyName>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <PackageId>$(AssemblyName)</PackageId>
+    <Authors>$(Company)</Authors>
+    <PackageProjectUrl>https://newlifex.com/iot</PackageProjectUrl>
+    <PackageIcon>leaf.png</PackageIcon>
+    <RepositoryUrl>https://github.com/NewLifeX/NewLife.AB</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageTags>物联网;IoT;边缘计算;Edge;新生命团队;NewLife;PLC;罗克韦尔;Rockwell;Allen-Bradley;AB;EtherNet/IP;CIP;Logix;ControlLogix;CompactLogix;工业自动化;数据采集;设备监控;SCADA;通信协议;自动重连;异步;LogixClient;LogixServer;$(AssemblyName)</PackageTags>
+    <PackageReleaseNotes>
+v1.0 首个正式版本
+EtherNet/IP：Register Session、List Identity、SendRRData / SendUnitData
+Logix 符号标签：Read/Write Tag、分段读写、Read-Modify-Write、多服务打包
+数据类型：BOOL/SINT/INT/DINT/LINT/USINT/UINT/UDINT/ULINT/REAL/LREAL/STRING 及一维数组
+路由：背板槽号与可选路由路径；可选 Forward Open 显式连接
+模拟服务器：LogixServer 无需真实 PLC 即可开发与单元测试
+    </PackageReleaseNotes>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <AllowedOutputExtensionsInPackageBuildOutputFolder>$(AllowedOutputExtensionsInPackageBuildOutputFolder);.pdb</AllowedOutputExtensionsInPackageBuildOutputFolder>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.SourceLink.GitHub" Version="10.0.402">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="NewLife.IoT" Version="3.2.2026.1024" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="..\Doc\leaf.png" Link="leaf.png" PackagePath="\" />
+  </ItemGroup>
+
+</Project>
