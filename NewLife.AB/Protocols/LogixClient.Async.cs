@@ -1,4 +1,6 @@
 using System.Net.Sockets;
+using NewLife.Data;
+using NewLife.Net;
 using NewLife.Log;
 
 namespace NewLife.AB.Protocols;
@@ -240,32 +242,25 @@ public partial class LogixClient
         if (IsConnected) return;
         if (Host == null || Host.Length == 0) throw new ArgumentException("未指定主机");
 
-        TcpClient client = null;
+        ISocketClient client = null;
         try
         {
-            client = new TcpClient { NoDelay = true };
-            var connectTask = client.ConnectAsync(Host, Port);
-            var timeoutTask = Task.Delay(ConnectTimeout);
-            if (await Task.WhenAny(connectTask, timeoutTask).ConfigureAwait(false) != connectTask)
-            {
-                client.Close();
+            client = CreateSocket();
+            if (!await client.OpenAsync(CancellationToken.None).ConfigureAwait(false))
                 throw new TimeoutException("连接超时: " + Host + ":" + Port);
-            }
-            await connectTask.ConfigureAwait(false);
-
+            ApplyTimeouts(client);
             _client = client;
-            _stream = client.GetStream();
-            _stream.ReadTimeout = ReceiveTimeout;
-            _stream.WriteTimeout = ConnectTimeout;
+            _inbox.Clear();
             await RegisterSessionAsync().ConfigureAwait(false);
             if (ConnectedMessaging) await OpenConnectionAsync().ConfigureAwait(false);
             XTrace.WriteLine("Logix 已连接: " + Host + ":" + Port + " 会话 0x" + _session.ToString("X8"));
         }
         catch (Exception ex)
         {
-            try { client?.Close(); } catch { }
+            try { client?.Close("connect"); } catch { }
+            client.TryDispose();
             _client = null;
-            _stream = null;
+            _inbox.Clear();
             _session = 0;
             if (ex is ArgumentException || ex is CipException || ex is TimeoutException) throw;
             throw new InvalidOperationException("连接失败: " + ex.Message, ex);
@@ -368,37 +363,33 @@ public partial class LogixClient
 
     private async Task<EipPacket> SendPacketAsync(EipPacket packet)
     {
-        if (_stream == null) throw new InvalidOperationException("未连接到服务器");
+        if (_client == null || !_client.Active) throw new InvalidOperationException("未连接到服务器");
+        ApplyTimeouts(_client);
         var bytes = packet.ToBytes();
-        await _stream.WriteAsync(bytes, 0, bytes.Length).ConfigureAwait(false);
-
-        var header = new Byte[EipPacket.HeaderSize];
-        await ReadExactlyAsync(header, 0, header.Length).ConfigureAwait(false);
-        var length = EipPacket.ReadDataLength(header);
-        if (length > 1024 * 1024) throw new InvalidOperationException("应答长度异常");
-        var data = new Byte[length];
-        if (length > 0) await ReadExactlyAsync(data, 0, length).ConfigureAwait(false);
-        return EipPacket.FromHeader(header, data);
+        _client.Send(bytes, 0, bytes.Length);
+        return DecodeFrame(await ReadFrameAsync().ConfigureAwait(false));
     }
 
-    private async Task ReadExactlyAsync(Byte[] buffer, Int32 offset, Int32 count)
+    private async Task<Byte[]> ReadFrameAsync()
     {
-        var read = 0;
-        using (var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(ReceiveTimeout)))
+        while (true)
         {
+            if (TryTakeFrame(out var frame)) return frame;
+            IOwnerPacket packet;
             try
             {
-                while (read < count)
-                {
-                    var n = await _stream.ReadAsync(buffer, offset + read, count - read, cts.Token).ConfigureAwait(false);
-                    if (n <= 0) throw new IOException("连接已关闭");
-                    read += n;
-                }
+                using var cts = new CancellationTokenSource(ReceiveTimeout);
+                packet = await _client.ReceiveAsync(cts.Token).ConfigureAwait(false);
             }
             catch (OperationCanceledException)
             {
                 throw new TimeoutException("接收数据超时");
             }
+            catch (SocketException ex) when (IsTimeout(ex))
+            {
+                throw new TimeoutException("接收数据超时", ex);
+            }
+            AppendInbox(packet);
         }
     }
 

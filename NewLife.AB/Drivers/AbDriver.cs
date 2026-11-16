@@ -98,7 +98,7 @@ public class AbDriver : DriverBase
         return TaskEx.CompletedTask;
     }
 
-    /// <summary>读取点位。Length 为字节数，按点位类型换成元素个数。</summary>
+    /// <summary>读取点位。指定类型时 Length 为字节数，再换成元素个数；未指定类型且 Length 大于 1 时，Length 就是元素个数。</summary>
     /// <param name="node">节点</param>
     /// <param name="points">点位</param>
     /// <param name="cancellationToken">取消令牌</param>
@@ -246,8 +246,11 @@ public class AbDriver : DriverBase
             if (typeCode == CipDataType.String) return 1;
             var size = CipDataType.GetElementSize(typeCode);
             if (size > 0 && length >= size) return (UInt16)(length / size);
+            return 1;
         }
-        return 1;
+
+        if (length > UInt16.MaxValue) throw new ArgumentOutOfRangeException(nameof(point), "元素个数超过 65535");
+        return (UInt16)length;
     }
 
     private static void ParseEndpoint(String address, out String host, out Int32 port)

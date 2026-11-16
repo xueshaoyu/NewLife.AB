@@ -36,7 +36,7 @@ dotnet add package NewLife.AB
 <PackageReference Include="NewLife.AB" Version="1.0.*" />
 ```
 
-目标框架与 NewLife.Omron 一致：`net45`、`net461`、`netstandard2.0`、`netstandard2.1`。
+目标框架：`net45`、`net461`、`netstandard2.0`、`netstandard2.1`。
 
 ## 快速开始
 
@@ -109,7 +109,7 @@ driver.Write(node, point, 12345);
 driver.Close(node);
 ```
 
-点位 `Length` 按字节计。类型为 DINT 且长度为 4 时读 1 个元素，长度为 16 时读 4 个元素。多个标量点会走多服务打包。
+点位指定类型时，`Length` 按字节计。类型为 DINT 且长度为 4 时读 1 个元素，长度为 16 时读 4 个元素。未指定类型且 `Length` 大于 1 时，`Length` 就是元素个数，应答里的 CIP 类型决定解码。多个标量点会走多服务打包。
 
 ### 控制台
 
@@ -118,9 +118,11 @@ driver.Close(node);
 ```bash
 dotnet run --project Test -- 192.168.1.10:44818 --slot 0 --tag Program:MainProgram.Counter
 dotnet run --project Test -- 192.168.1.10:44818 --slot 2 --tag Counter --write 123
+dotnet run --project Test -- 192.168.1.32:44818 --direct --tag GET_1 --count 10
+dotnet run --project Test -- 192.168.1.32:44818 --direct --tag GET_1 --type DINT --length 40
 ```
 
-不带参数时进入交互：输入标签名读取，输入 `标签=整数` 按 DINT 写入。`--direct` 关闭背板路由。
+带 `--tag` 时走 `AbDriver`。`--type` 是点位类型，`--length` 是点位长度：指定类型时按字节，不指定类型时按元素个数。只给 `--type` 和 `--count` 时，控制台按元素宽度把个数换成字节。不带参数时进入交互：输入标签名读取，`标签 个数` 或 `标签 类型 个数` 读数组，`标签=整数` 按 DINT 写入。`--direct` 关闭背板路由。
 
 ### 模拟器
 

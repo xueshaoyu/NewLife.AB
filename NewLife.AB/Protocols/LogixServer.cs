@@ -1,7 +1,8 @@
 using System.Net;
-using System.Net.Sockets;
 using System.Text;
+using NewLife.Data;
 using NewLife.Log;
+using NewLife.Net;
 
 namespace NewLife.AB.Protocols;
 
@@ -20,7 +21,7 @@ namespace NewLife.AB.Protocols;
 /// client.WriteInt32("Counter", 123);
 /// </code>
 /// </remarks>
-public sealed class LogixServer : IDisposable
+public sealed class LogixServer : NetServer<LogixServer.EipSession>
 {
     /// <summary>模拟 STRING 的默认结构句柄</summary>
     public const UInt16 DefaultStringHandle = 0x00CE;
@@ -28,16 +29,10 @@ public sealed class LogixServer : IDisposable
     private readonly Object _gate = new Object();
     private readonly Dictionary<String, TagData> _tags = new Dictionary<String, TagData>(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<UInt32> _sessions = new HashSet<UInt32>();
-    private readonly List<TcpClient> _clients = new List<TcpClient>();
-    private TcpListener _listener;
-    private CancellationTokenSource _cts;
     private UInt32 _nextSession = 1;
 
-    /// <summary>监听端口。Start 之后为实际端口。</summary>
-    public Int32 Port { get; private set; }
-
     /// <summary>是否在运行</summary>
-    public Boolean IsRunning => _listener != null;
+    public Boolean IsRunning => Active;
 
     /// <summary>写入未知标签时是否创建。默认 true。真实 PLC 不会创建标签。</summary>
     public Boolean AutoCreateTags { get; set; } = true;
@@ -82,41 +77,30 @@ public sealed class LogixServer : IDisposable
     /// <param name="port">端口。0 表示由系统分配。</param>
     public void Start(Int32 port = 0)
     {
-        if (_listener != null) return;
-        _listener = new TcpListener(IPAddress.Loopback, port);
-        _listener.Start();
-        Port = ((IPEndPoint)_listener.LocalEndpoint).Port;
-        _cts = new CancellationTokenSource();
-        ThreadPool.QueueUserWorkItem(_ => AcceptLoop());
+        if (Active) return;
+        Name = "Logix";
+        SessionTimeout = 0;
+        Local = new NetUri(NetType.Tcp, IPAddress.Loopback, port);
+        Port = port;
+        base.Start();
         XTrace.WriteLine("LogixServer 已启动: " + Port);
     }
 
     /// <summary>停止监听并断开客户端</summary>
-    public void Stop()
-    {
-        try { _cts?.Cancel(); } catch { }
-        try { _listener?.Stop(); } catch { }
-        _listener = null;
-        DropClients();
-    }
+    public void Stop() => base.Stop("stop");
 
     /// <summary>断开当前客户端，监听保持</summary>
     public void DropClients()
     {
-        TcpClient[] clients;
-        lock (_clients)
+        var sessions = Sessions;
+        if (sessions == null || sessions.Count == 0) return;
+        var list = new List<INetSession>(sessions.Count);
+        foreach (var item in sessions) list.Add(item.Value);
+        foreach (var session in list)
         {
-            clients = _clients.ToArray();
-            _clients.Clear();
-        }
-        foreach (var client in clients)
-        {
-            try { client.Close(); } catch { }
+            try { session.Close("drop"); } catch { }
         }
     }
-
-    /// <summary>释放</summary>
-    public void Dispose() => Stop();
 
     /// <summary>预置标签。data 为全部元素的原始字节。</summary>
     /// <param name="address">地址</param>
@@ -159,67 +143,10 @@ public sealed class LogixServer : IDisposable
         }
     }
 
-    private void AcceptLoop()
+    private void Forget(UInt32 session)
     {
-        while (_cts != null && !_cts.IsCancellationRequested)
-        {
-            TcpClient client = null;
-            try
-            {
-                client = _listener.AcceptTcpClient();
-            }
-            catch
-            {
-                break;
-            }
-
-            lock (_clients) _clients.Add(client);
-            ThreadPool.QueueUserWorkItem(state => HandleClient((TcpClient)state), client);
-        }
-    }
-
-    private void HandleClient(TcpClient client)
-    {
-        var state = new ClientState();
-        try
-        {
-            client.NoDelay = true;
-            var stream = client.GetStream();
-            stream.ReadTimeout = 30000;
-            while (client.Connected)
-            {
-                var header = new Byte[EipPacket.HeaderSize];
-                if (!TryRead(stream, header, 0, header.Length)) break;
-                var length = EipPacket.ReadDataLength(header);
-                var data = new Byte[length];
-                if (length > 0 && !TryRead(stream, data, 0, length)) break;
-                var request = EipPacket.FromHeader(header, data);
-                if (request.Command == EipCommand.Nop || request.Command == EipCommand.UnRegisterSession)
-                {
-                    if (request.Command == EipCommand.UnRegisterSession)
-                    {
-                        lock (_gate) _sessions.Remove(request.SessionHandle);
-                    }
-                    continue;
-                }
-
-                var response = HandlePacket(request, state);
-                var bytes = response.ToBytes();
-                stream.Write(bytes, 0, bytes.Length);
-            }
-        }
-        catch
-        {
-        }
-        finally
-        {
-            try { client.Close(); } catch { }
-            lock (_clients) _clients.Remove(client);
-            if (state.Session != 0)
-            {
-                lock (_gate) _sessions.Remove(state.Session);
-            }
-        }
+        if (session == 0) return;
+        lock (_gate) _sessions.Remove(session);
     }
 
     private EipPacket HandlePacket(EipPacket request, ClientState state)
@@ -747,18 +674,6 @@ public sealed class LogixServer : IDisposable
     private static CipMessage Fail(Byte service, Byte status, UInt16 extended) =>
         new CipMessage { Service = service, GeneralStatus = status, ExtendedStatus = new UInt16[] { extended } };
 
-    private static Boolean TryRead(NetworkStream stream, Byte[] buffer, Int32 offset, Int32 count)
-    {
-        var read = 0;
-        while (read < count)
-        {
-            var n = stream.Read(buffer, offset + read, count - read);
-            if (n <= 0) return false;
-            read += n;
-        }
-        return true;
-    }
-
     private sealed class TagData
     {
         public UInt16 TypeCode;
@@ -772,5 +687,65 @@ public sealed class LogixServer : IDisposable
         public UInt32 Session;
         public UInt32 O2TConnectionId;
         public UInt32 T2OConnectionId;
+    }
+
+    /// <summary>模拟器上的一条 TCP 会话。按 EtherNet/IP 的 24 字节头切帧。</summary>
+    public sealed class EipSession : NetSession<LogixServer>
+    {
+        private readonly List<Byte> _inbox = new List<Byte>();
+        private readonly ClientState _state = new ClientState();
+
+        /// <summary>收到数据后切出完整封装帧并应答</summary>
+        /// <param name="e">接收参数</param>
+        protected override void OnReceive(ReceivedEventArgs e)
+        {
+            var chunk = e.Packet == null ? null : e.Packet.ReadBytes();
+            if (chunk == null || chunk.Length == 0) return;
+            _inbox.AddRange(chunk);
+            while (TryTakePacket(out var request))
+            {
+                if (request.Command == EipCommand.Nop || request.Command == EipCommand.UnRegisterSession)
+                {
+                    if (request.Command == EipCommand.UnRegisterSession) Host.Forget(request.SessionHandle);
+                    continue;
+                }
+
+                var response = Host.HandlePacket(request, _state);
+                var bytes = response.ToBytes();
+                Send(bytes, 0, bytes.Length);
+            }
+        }
+
+        /// <summary>连接断开时丢掉会话句柄</summary>
+        /// <param name="reason">原因</param>
+        protected override void OnDisconnected(String reason)
+        {
+            Host?.Forget(_state.Session);
+            base.OnDisconnected(reason);
+        }
+
+        private Boolean TryTakePacket(out EipPacket packet)
+        {
+            packet = null;
+            if (_inbox.Count < EipPacket.HeaderSize) return false;
+            var header = new Byte[EipPacket.HeaderSize];
+            _inbox.CopyTo(0, header, 0, header.Length);
+            var length = EipPacket.ReadDataLength(header);
+            if (length < 0 || length > 1024 * 1024)
+            {
+                _inbox.Clear();
+                return false;
+            }
+            var total = EipPacket.HeaderSize + length;
+            if (_inbox.Count < total) return false;
+            var data = new Byte[length];
+            if (length > 0)
+            {
+                for (var i = 0; i < length; i++) data[i] = _inbox[EipPacket.HeaderSize + i];
+            }
+            packet = EipPacket.FromHeader(header, data);
+            _inbox.RemoveRange(0, total);
+            return true;
+        }
     }
 }

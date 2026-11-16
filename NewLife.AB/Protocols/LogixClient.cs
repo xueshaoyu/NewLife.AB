@@ -1,5 +1,7 @@
 using System.Net.Sockets;
+using NewLife.Data;
 using NewLife.Log;
+using NewLife.Net;
 
 namespace NewLife.AB.Protocols;
 
@@ -24,8 +26,8 @@ public partial class LogixClient : IDisposable
     private readonly Object _lock = new Object();
     private readonly Dictionary<String, UInt16> _stringHandles = new Dictionary<String, UInt16>(StringComparer.OrdinalIgnoreCase);
     private readonly Random _random = new Random();
-    private TcpClient _client;
-    private NetworkStream _stream;
+    private ISocketClient _client;
+    private readonly List<Byte> _inbox = new List<Byte>();
     private UInt32 _session;
     private UInt64 _context = 1;
     private UInt16 _sequence = 1;
@@ -96,7 +98,7 @@ public partial class LogixClient : IDisposable
     public UInt32 SessionHandle => _session;
 
     /// <summary>是否已连接</summary>
-    public Boolean IsConnected => _client != null && _client.Connected;
+    public Boolean IsConnected => _client != null && _client.Active;
 
     #endregion
 
@@ -144,31 +146,24 @@ public partial class LogixClient : IDisposable
         if (IsConnected) return;
         if (Host == null || Host.Length == 0) throw new ArgumentException("未指定主机");
 
-        TcpClient client = null;
+        ISocketClient client = null;
         try
         {
-            client = new TcpClient { NoDelay = true };
-            var task = client.ConnectAsync(Host, Port);
-            if (!task.Wait(ConnectTimeout))
-            {
-                client.Close();
-                throw new TimeoutException("连接超时: " + Host + ":" + Port);
-            }
-            if (task.IsFaulted) throw task.Exception.InnerException ?? task.Exception;
-
+            client = CreateSocket();
+            if (!client.Open()) throw new TimeoutException("连接超时: " + Host + ":" + Port);
+            ApplyTimeouts(client);
             _client = client;
-            _stream = client.GetStream();
-            _stream.ReadTimeout = ReceiveTimeout;
-            _stream.WriteTimeout = ConnectTimeout;
+            _inbox.Clear();
             RegisterSessionCore();
             if (ConnectedMessaging) OpenConnectionCore();
             XTrace.WriteLine("Logix 已连接: " + Host + ":" + Port + " 会话 0x" + _session.ToString("X8"));
         }
         catch (Exception ex)
         {
-            try { client?.Close(); } catch { }
+            try { client?.Close("connect"); } catch { }
+            client.TryDispose();
             _client = null;
-            _stream = null;
+            _inbox.Clear();
             _session = 0;
             if (ex is ArgumentException || ex is CipException || ex is TimeoutException) throw;
             throw new InvalidOperationException("连接失败: " + ex.Message, ex);
@@ -177,26 +172,26 @@ public partial class LogixClient : IDisposable
 
     private void CloseCore()
     {
-        if (_o2tConnectionId != 0 && _stream != null)
+        if (_o2tConnectionId != 0 && _client != null && _client.Active)
         {
             try { CloseConnectionCore(); } catch { }
         }
 
-        if (_session != 0 && _stream != null)
+        if (_session != 0 && _client != null && _client.Active)
         {
             try
             {
                 var packet = new EipPacket { Command = EipCommand.UnRegisterSession, SessionHandle = _session };
                 var bytes = packet.ToBytes();
-                _stream.Write(bytes, 0, bytes.Length);
+                _client.Send(bytes, 0, bytes.Length);
             }
             catch { }
         }
 
-        try { _stream?.Close(); } catch { }
-        try { _client?.Close(); } catch { }
-        _stream = null;
+        try { _client?.Close("close"); } catch { }
+        _client.TryDispose();
         _client = null;
+        _inbox.Clear();
         _session = 0;
         _o2tConnectionId = 0;
     }
@@ -336,31 +331,91 @@ public partial class LogixClient : IDisposable
         return CipMessage.ParseResponse(cip);
     }
 
+    private ISocketClient CreateSocket()
+    {
+        var client = new NetUri(NetType.Tcp, Host, Port).CreateRemote();
+        client.Timeout = ConnectTimeout;
+        if (client is SessionBase session)
+        {
+            session.AutoReceive = false;
+            session.BufferSize = 8192;
+        }
+        if (client is TcpSession tcp) tcp.NoDelay = true;
+        return client;
+    }
+
+    private void ApplyTimeouts(ISocketClient client)
+    {
+        client.Timeout = ReceiveTimeout;
+        var socket = (client as SessionBase)?.Client;
+        if (socket == null) return;
+        socket.SendTimeout = ConnectTimeout;
+        socket.ReceiveTimeout = ReceiveTimeout;
+    }
+
     private EipPacket SendPacketCore(EipPacket packet)
     {
-        if (_stream == null) throw new InvalidOperationException("未连接到服务器");
+        if (_client == null || !_client.Active) throw new InvalidOperationException("未连接到服务器");
+        ApplyTimeouts(_client);
         var bytes = packet.ToBytes();
-        _stream.Write(bytes, 0, bytes.Length);
+        _client.Send(bytes, 0, bytes.Length);
+        return DecodeFrame(ReadFrame());
+    }
 
+    private Byte[] ReadFrame()
+    {
+        while (true)
+        {
+            if (TryTakeFrame(out var frame)) return frame;
+            IOwnerPacket packet = null;
+            try
+            {
+                packet = _client.Receive();
+            }
+            catch (SocketException ex) when (IsTimeout(ex))
+            {
+                throw new TimeoutException("接收数据超时", ex);
+            }
+            AppendInbox(packet);
+        }
+    }
+
+    private void AppendInbox(IOwnerPacket packet)
+    {
+        if (packet == null || packet.Total == 0) throw new IOException("连接已关闭");
+        var chunk = packet.ReadBytes();
+        packet.TryDispose();
+        if (chunk == null || chunk.Length == 0) throw new IOException("连接已关闭");
+        _inbox.AddRange(chunk);
+    }
+
+    private Boolean TryTakeFrame(out Byte[] frame)
+    {
+        frame = null;
+        if (_inbox.Count < EipPacket.HeaderSize) return false;
         var header = new Byte[EipPacket.HeaderSize];
-        ReadExactly(header, 0, header.Length);
+        _inbox.CopyTo(0, header, 0, header.Length);
         var length = EipPacket.ReadDataLength(header);
-        if (length > 1024 * 1024) throw new InvalidOperationException("应答长度异常");
-        var data = new Byte[length];
-        if (length > 0) ReadExactly(data, 0, length);
+        if (length < 0 || length > 1024 * 1024) throw new InvalidOperationException("应答长度异常");
+        var total = EipPacket.HeaderSize + length;
+        if (_inbox.Count < total) return false;
+        frame = new Byte[total];
+        _inbox.CopyTo(0, frame, 0, total);
+        _inbox.RemoveRange(0, total);
+        return true;
+    }
+
+    private static EipPacket DecodeFrame(Byte[] frame)
+    {
+        var header = new Byte[EipPacket.HeaderSize];
+        Buffer.BlockCopy(frame, 0, header, 0, header.Length);
+        var data = new Byte[frame.Length - header.Length];
+        if (data.Length > 0) Buffer.BlockCopy(frame, header.Length, data, 0, data.Length);
         return EipPacket.FromHeader(header, data);
     }
 
-    private void ReadExactly(Byte[] buffer, Int32 offset, Int32 count)
-    {
-        var read = 0;
-        while (read < count)
-        {
-            var n = _stream.Read(buffer, offset + read, count - read);
-            if (n <= 0) throw new IOException("连接已关闭");
-            read += n;
-        }
-    }
+    private static Boolean IsTimeout(SocketException ex) =>
+        ex.SocketErrorCode == SocketError.TimedOut || ex.ErrorCode == 10060;
 
     private void SleepRetry(Int32 retry)
     {

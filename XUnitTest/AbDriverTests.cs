@@ -116,6 +116,36 @@ public class AbDriverTests
     }
 
     [Fact]
+    [DisplayName("未指定类型时 Length 为元素个数，指定类型时 Length 仍是字节数")]
+    public void ReadArray()
+    {
+        using var server = new LogixServer();
+        server.Start();
+        var data = new Byte[16];
+        Buffer.BlockCopy(BitConverter.GetBytes(1), 0, data, 0, 4);
+        Buffer.BlockCopy(BitConverter.GetBytes(2), 0, data, 4, 4);
+        Buffer.BlockCopy(BitConverter.GetBytes(3), 0, data, 8, 4);
+        Buffer.BlockCopy(BitConverter.GetBytes(4), 0, data, 12, 4);
+        server.SetTag("GET_1", CipDataType.Dint, data);
+
+        var driver = new AbDriver();
+        var node = driver.Open(null!, new AbParameter { Address = "127.0.0.1:" + server.Port });
+
+        var byCount = new TestPoint { Name = "GET_1", Address = "GET_1", Length = 4 };
+        var values = Assert.IsType<Int32[]>(driver.Read(node, new IPoint[] { byCount }).GetValue("GET_1"));
+        Assert.Equal(new[] { 1, 2, 3, 4 }, values);
+
+        var byBytes = new TestPoint { Name = "GET_1", Address = "GET_1", Type = "DINT", Length = 16 };
+        var again = Assert.IsType<Int32[]>(driver.Read(node, new IPoint[] { byBytes }).GetValue("GET_1"));
+        Assert.Equal(new[] { 1, 2, 3, 4 }, again);
+
+        var one = new TestPoint { Name = "GET_1", Address = "GET_1", Type = "DINT", Length = 4 };
+        Assert.Equal(1, driver.Read(node, new IPoint[] { one }).GetValue("GET_1"));
+
+        driver.Close(node);
+    }
+
+    [Fact]
     [DisplayName("驱动读到不存在的标签时失败")]
     public void BadPath()
     {
